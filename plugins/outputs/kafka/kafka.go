@@ -14,6 +14,7 @@ import (
 	tlsint "github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/serializers"
+	"github.com/damiannolan/sasl/oauthbearer"
 )
 
 var ValidTopicSuffixMethods = []string{
@@ -26,18 +27,18 @@ var zeroTime = time.Unix(0, 0)
 
 type (
 	Kafka struct {
-		Brokers          []string    `toml:"brokers"`
-		Topic            string      `toml:"topic"`
-		TopicTag         string      `toml:"topic_tag"`
-		ExcludeTopicTag  bool        `toml:"exclude_topic_tag"`
-		ClientID         string      `toml:"client_id"`
+		Brokers		  []string    `toml:"brokers"`
+		Topic		    string      `toml:"topic"`
+		TopicTag		 string      `toml:"topic_tag"`
+		ExcludeTopicTag  bool		`toml:"exclude_topic_tag"`
+		ClientID		 string      `toml:"client_id"`
 		TopicSuffix      TopicSuffix `toml:"topic_suffix"`
 		RoutingTag       string      `toml:"routing_tag"`
 		RoutingKey       string      `toml:"routing_key"`
-		CompressionCodec int         `toml:"compression_codec"`
-		RequiredAcks     int         `toml:"required_acks"`
-		MaxRetry         int         `toml:"max_retry"`
-		MaxMessageBytes  int         `toml:"max_message_bytes"`
+		CompressionCodec int		 `toml:"compression_codec"`
+		RequiredAcks     int		 `toml:"required_acks"`
+		MaxRetry		 int		 `toml:"max_retry"`
+		MaxMessageBytes  int		 `toml:"max_message_bytes"`
 
 		Version string `toml:"version"`
 
@@ -54,8 +55,18 @@ type (
 
 		SASLUsername string `toml:"sasl_username"`
 		SASLPassword string `toml:"sasl_password"`
+		SASLMechanism string `toml:"sasl_mechanism"`
 		SASLVersion  *int   `toml:"sasl_version"`
 
+                SASLOAUTHClientID string `toml:"sasl_oauth_client_id"`
+                SASLOAUTHClientSecret string `toml:"sasl_oauth_client_secret"`
+		SASLOAUTHTokenURL  string `toml:"sasl_oauth_url"`
+
+		SASLGSSAPIServicename string `toml:"sasl_gssapi_servicename"`
+		SASLGSSAPIRealm string `toml:"sasl_gssapi_realm"`
+		SASLGSSAPIKeyTabPath string `toml:"sasl_gssapi_key_tab_path"`
+		SASLGSSAPIKerberosConfigPath string `toml:"sasl_gssapi_kerberos_config_path"`
+		
 		Log telegraf.Logger `toml:"-"`
 
 		tlsConfig tls.Config
@@ -65,6 +76,7 @@ type (
 
 		serializer serializers.Serializer
 	}
+
 	TopicSuffix struct {
 		Method    string   `toml:"method"`
 		Keys      []string `toml:"keys"`
@@ -118,8 +130,8 @@ var sampleConfig = `
   ## If the section is omitted, no suffix is used.
   ## Following topic suffix methods are supported:
   ##   measurement - suffix equals to separator + measurement's name
-  ##   tags        - suffix equals to separator + specified tags' values
-  ##                 interleaved with separator
+  ##   tags		- suffix equals to separator + specified tags' values
+  ##				 interleaved with separator
 
   ## Suffix equals to "_" + measurement name
   # [outputs.kafka.topic_suffix]
@@ -200,9 +212,32 @@ var sampleConfig = `
   ## Use TLS but skip chain & host verification
   # insecure_skip_verify = false
 
-  ## Optional SASL Config
+  ## Optional SASL Configuration parameters
+  # 
+  ## sha256
+  # sasl_mechanism = "SCRAM-SHA-256"
   # sasl_username = "kafka"
   # sasl_password = "secret"
+  #
+  ## sha512
+  # sasl_mechanism = "SCRAM-SHA-512"
+  # sasl_username = "kafka"
+  # sasl_password = "secret"
+  #
+  ## oauth
+  # sasl_mechanism = "OAUTHBEARER"
+  # sasl_oauth_client_id = "my_client_id"
+  # sasl_oauth_client_secret = "my_secret"
+  # sasl_oauth_url = "http://my_oauth_provider/auth/realms/my_realm/protocol/openid-connect/auth"
+  #
+  ## gssapi
+  # sasl_mechanism = "GSSAPI"
+  # sasl_username = "kafka"
+  # sasl_password = "secret"
+  # sasl_gssapi_servicename = "kafka"
+  # sasl_gssapi_realm = "EXAMPLE.COM"
+  # sasl_gssapi_key_tab_path = "my.keytab"
+  # sasl_gssapi_kerberos_config_path = "/etc/krb5.conf"
 
   ## SASL protocol version.  When connecting to Azure EventHub set to 0.
   # sasl_version = 1
@@ -320,11 +355,34 @@ func (k *Kafka) Connect() error {
 		}
 	}
 
-	if k.SASLUsername != "" && k.SASLPassword != "" {
+	if ((k.SASLUsername != "" && k.SASLPassword != "") || (k.SASLOAUTHClientID != "" && k.SASLOAUTHClientSecret != "" && k.SASLOAUTHTokenURL != "")) {
+		config.Net.SASL.Enable = true
 		config.Net.SASL.User = k.SASLUsername
 		config.Net.SASL.Password = k.SASLPassword
-		config.Net.SASL.Enable = true
-
+		switch k.SASLMechanism {
+			case sarama.SASLTypeSCRAMSHA512:
+				config.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeSCRAMSHA512)
+				config.Net.SASL.SCRAMClientGeneratorFunc = 
+					func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA512} }
+			case sarama.SASLTypeSCRAMSHA256:
+				config.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeSCRAMSHA256)
+				config.Net.SASL.SCRAMClientGeneratorFunc = 
+					func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
+	                case sarama.SASLTypeOAuth:
+        	                config.Net.SASL.Enable = true
+                	        config.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeOAuth)
+			        config.Net.SASL.TokenProvider = oauthbearer.NewTokenProvider(k.SASLOAUTHClientID, k.SASLOAUTHClientSecret, k.SASLOAUTHTokenURL)
+			case sarama.SASLTypeGSSAPI:
+				config.Net.SASL.Enable = true
+				config.Net.SASL.Mechanism = sarama.SASLMechanism(sarama.SASLTypeGSSAPI)
+				config.Net.SASL.GSSAPI.AuthType = sarama.KRB5_USER_AUTH
+				config.Net.SASL.GSSAPI.Username = k.SASLUsername
+				config.Net.SASL.GSSAPI.Password = k.SASLPassword
+				config.Net.SASL.GSSAPI.ServiceName = k.SASLGSSAPIServicename
+				config.Net.SASL.GSSAPI.Realm = k.SASLGSSAPIRealm
+				config.Net.SASL.GSSAPI.KeyTabPath = k.SASLGSSAPIKeyTabPath
+				config.Net.SASL.GSSAPI.KerberosConfigPath = k.SASLGSSAPIKerberosConfigPath
+		}
 		version, err := kafka.SASLVersion(config.Version, k.SASLVersion)
 		if err != nil {
 			return err
